@@ -1,1 +1,4 @@
 __pycache__/
+
+# AI
+*.local.json
