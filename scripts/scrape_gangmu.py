@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """爬取《本草纲目》全文，按页保存为 Markdown 文件。
-每个药材提取：释名、气味、主治、附方。"""
+每个药材提取：释名、气味、主治、附方、考释。"""
 
 import os
 import re
@@ -88,7 +88,7 @@ def parse_page(html):
     )
 
     for table_html in tables:
-        drug = {"name": "", "释名": "", "气味": "", "主治": "", "附方": ""}
+        drug = {"name": "", "释名": "", "气味": "", "主治": "", "附方": "", "考释": ""}
 
         # 药名
         cap = re.search(r'<caption>(.*?)</caption>', table_html, re.DOTALL)
@@ -137,6 +137,11 @@ def format_markdown(title, drugs):
         if drug["附方"]:
             lines.append("**附方**\n")
             lines.append(drug["附方"])
+            lines.append("")
+
+        if drug["考释"]:
+            lines.append("**考释**\n")
+            lines.append(drug["考释"])
             lines.append("")
 
         lines.append("---\n")
