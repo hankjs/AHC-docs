@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>山海经地理可视化地图</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; overflow: hidden; font-family: "SimSun", "STSong", serif; }
+#map-svg { width: 100vw; height: 100vh; cursor: grab; }
+#map-svg:active { cursor: grabbing; }
+#tooltip {
+  position: fixed; display: none; background: rgba(20,20,40,0.95);
+  border: 1px solid #8b7355; border-radius: 6px; padding: 10px 14px;
+  color: #e8d5b7; font-size: 13px; max-width: 380px; z-index: 100;
+  pointer-events: none; line-height: 1.6; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+}
+#tooltip .tt-name { font-size: 16px; font-weight: bold; color: #f0c060; margin-bottom: 4px; }
+#tooltip .tt-cat { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; margin-bottom: 4px; }
+#tooltip .tt-text { color: #c0b090; font-size: 12px; margin-top: 4px; border-top: 1px solid #444; padding-top: 4px; }
+#legend {
+  position: fixed; top: 12px; right: 12px; background: rgba(20,20,40,0.92);
+  border: 1px solid #5a4a3a; border-radius: 8px; padding: 12px 16px;
+  color: #d0c0a0; font-size: 12px; z-index: 50; min-width: 140px;
+}
+#legend h3 { font-size: 14px; margin-bottom: 8px; color: #f0c060; text-align: center; }
+.leg-item { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+.leg-swatch { width: 16px; height: 12px; border-radius: 2px; flex-shrink: 0; }
+#info-bar {
+  position: fixed; bottom: 12px; left: 12px; background: rgba(20,20,40,0.85);
+  border: 1px solid #5a4a3a; border-radius: 6px; padding: 8px 14px;
+  color: #a09080; font-size: 12px; z-index: 50;
+}
+#loading {
+  position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+  color: #f0c060; font-size: 20px; z-index: 200;
+}
+</style>
+</head>
+<body>
+<svg id="map-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+<div id="tooltip"></div>
+<div id="loading">加载数据中…</div>
+<div id="legend">
+  <h3>图例</h3>
+  <div class="leg-item"><div class="leg-swatch" style="background:#c0392b"></div>南（火·红）</div>
+  <div class="leg-item"><div class="leg-swatch" style="background:#2874a6"></div>北（水·蓝）</div>
+  <div class="leg-item"><div class="leg-swatch" style="background:#27ae60"></div>东（木·绿）</div>
+  <div class="leg-item"><div class="leg-swatch" style="background:#c49b30"></div>西（金·金）</div>
+  <div class="leg-item"><div class="leg-swatch" style="background:#8b6914"></div>中（土·棕）</div>
+  <hr style="border-color:#444;margin:6px 0">
+  <div class="leg-item"><div class="leg-swatch" style="border:2px dashed #888;background:none"></div>山系</div>
+  <div class="leg-item"><div class="leg-swatch" style="background:#888"></div>山/国/谷/地</div>
+  <div class="leg-item"><div class="leg-swatch" style="background:#4a9;height:2px;margin:5px 0"></div>水</div>
+</div>
+<div id="info-bar">山海经地理可视化 · 滚轮缩放 · 拖拽平移</div>
+
+<script>
+// ============================================================
+// 数据加载 - 从外部 JSON 文件读取
+// ============================================================
+async function loadData() {
+  const resp = await fetch('山海经_地理信息.json');
+  if (!resp.ok) throw new Error('无法加载数据文件: ' + resp.status);
+  return resp.json();
+}
+
+// ============================================================
+// 以下为纯渲染逻辑，不依赖具体数据内容
+// ============================================================
+
+// === Color scheme - HSL based with per-item variation ===
+const DIR_HUE = { '南': 0, '北': 210, '东': 145, '西': 42, '中': 30 };
+
+function getJingDirection(jw) {
+  if (jw.includes('南')) return '南';
+  if (jw.includes('北')) return '北';
+  if (jw.includes('东')) return '东';
+  if (jw.includes('西')) return '西';
+  return '中';
+}
+
+function getRingName(jw) {
+  if (jw.includes('大荒')) return '大荒';
+  if (jw.includes('海外')) return '海外';
+  if (jw.includes('海内')) return '海内';
+  return null;
+}
+
+function getTileColor(jw, ratio) {
+  const dir = getJingDirection(jw);
+  const baseHue = DIR_HUE[dir] ?? 30;
+  const isOuter = !!getRingName(jw);
+  const hue = (baseHue - 25 + ratio * 50 + 360) % 360;
+  const sat = isOuter ? 30 + ratio * 25 : 45 + ratio * 30;
+  const lit = isOuter ? 25 + ratio * 15 : 18 + ratio * 20;
+  return {
+    bg: `hsl(${hue.toFixed(1)}, ${sat.toFixed(1)}%, ${lit.toFixed(1)}%)`,
+    border: `hsl(${hue.toFixed(1)}, ${(sat+15).toFixed(1)}%, ${(lit+20).toFixed(1)}%)`,
+    text: `hsl(${hue.toFixed(1)}, 25%, ${78 + ratio * 8}%)`
+  };
+}
+
+function buildColorIndex(DATA) {
+  const grpIdx = {}, grpLen = {};
+  // Mountains grouped by 所属山系
+  const sc = {}, si = {};
+  for (const d of DATA) {
+    if (d['类别'] === '山' && d['所属山系']) sc[d['所属山系']] = (sc[d['所属山系']] || 0) + 1;
+  }
+  for (const d of DATA) {
+    if (d['类别'] === '山' && d['所属山系'] && sc[d['所属山系']]) {
+      si[d['所属山系']] = si[d['所属山系']] || 0;
+      grpIdx[d.id] = si[d['所属山系']]++;
+      grpLen[d.id] = sc[d['所属山系']];
+    }
+  }
+  // Outer ring items grouped by 所属经文
+  const jc = {}, ji = {};
+  for (const d of DATA) {
+    if (getRingName(d['所属经文'])) jc[d['所属经文']] = (jc[d['所属经文']] || 0) + 1;
+  }
+  for (const d of DATA) {
+    if (getRingName(d['所属经文'])) {
+      ji[d['所属经文']] = ji[d['所属经文']] || 0;
+      grpIdx[d.id] = ji[d['所属经文']]++;
+      grpLen[d.id] = jc[d['所属经文']];
+    }
+  }
+  return { grpIdx, grpLen };
+}
+
+function getColorSet(jw, id, colorIndex) {
+  const idx = colorIndex.grpIdx[id] ?? 0;
+  const total = colorIndex.grpLen[id] ?? 1;
+  const ratio = total > 1 ? idx / (total - 1) : 0.5;
+  return getTileColor(jw, ratio);
+}
+
+function getSysColor(jw) { return getTileColor(jw, 0.5); }
+
+// === Chinese number parsing ===
+const CN_NUMS = {'零':0,'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,'十':10,'百':100,'千':1000,'万':10000};
+
+function parseCN(s) {
+  if (!s) return 0;
+  let result = 0, section = 0, current = 0;
+  for (const ch of s) {
+    const v = CN_NUMS[ch];
+    if (v === undefined) continue;
+    if (v === 10) { if (current === 0) current = 1; section += current * 10; current = 0; }
+    else if (v >= 100) { if (current === 0) current = 1; result += (section + current) * v; section = 0; current = 0; }
+    else { current = v; }
+  }
+  return result + section + current;
+}
+
+// === Direction parsing ===
+const DIR_VECTORS = {
+  '东':[1,0],'西':[-1,0],'南':[0,1],'北':[0,-1],
+  '东南':[.707,.707],'东北':[.707,-.707],'西南':[-.707,.707],'西北':[-.707,-.707],
+};
+
+function parseDirection(text) {
+  if (!text || text.includes('海中') || text.includes('入海')) return null;
+  let s = text.replace(/^又/, '').replace(/水行|山行/, '');
+  let dir = null;
+  for (const d of ['东南','东北','西南','西北','东','西','南','北']) {
+    if (s.startsWith(d)) { dir = d; s = s.substring(d.length); break; }
+  }
+  if (!dir) return null;
+  const dist = parseCN(s);
+  if (dist === 0) return null;
+  return { dx: DIR_VECTORS[dir][0], dy: DIR_VECTORS[dir][1], dist };
+}
+
+function parseFlowDir(text) {
+  if (!text) return null;
+  for (const d of ['东南','东北','西南','西北','东','西','南','北']) {
+    if (text.startsWith(d)) return DIR_VECTORS[d];
+  }
+  return null;
+}
+
+// === Layout constants ===
+const TILE_W = 60, TILE_H = 40, TILE_GAP = 3, SYS_PAD = 8;
+const CX = 4000, CY = 4000;
+const INNER_W = 5000, INNER_H = 4400, RING_GAP = 500, SCALE = 0.12;
+
+// === Layout: mountains ===
+function layoutMountains(DATA) {
+  const positions = {};
+  const systemsList = [], systemMeta = {}, systemMountains = {};
+
+  for (const d of DATA) {
+    if (d['类别'] === '山系') {
+      systemMeta[d['名字']] = { jw: d['所属经文'], id: d.id };
+      systemsList.push(d['名字']);
+      systemMountains[d['名字']] = [];
+    }
+  }
+  for (const d of DATA) {
+    if (d['类别'] === '山' && d['所属山系'] && systemMountains[d['所属山系']]) {
+      systemMountains[d['所属山系']].push(d);
+    }
+  }
+
+  const sysByDir = {'南':[],'北':[],'东':[],'西':[],'中':[]};
+  for (const name of systemsList) sysByDir[getJingDirection(systemMeta[name].jw)].push(name);
+
+  for (const [dir, sysNames] of Object.entries(sysByDir)) {
+    let regionX, regionY;
+    if (dir==='南'){regionX=CX-1200;regionY=CY+600;}
+    else if(dir==='北'){regionX=CX-1600;regionY=CY-2000;}
+    else if(dir==='东'){regionX=CX+800;regionY=CY-800;}
+    else if(dir==='西'){regionX=CX-2400;regionY=CY-800;}
+    else{regionX=CX-1100;regionY=CY-600;}
+
+    let cursorX=regionX, cursorY=regionY, rowMaxH=0;
+    const maxRowW = dir==='中'?2200:(dir==='北'?3200:2400);
+
+    sysNames.forEach(sysName => {
+      const meta = systemMeta[sysName];
+      const mountains = systemMountains[sysName] || [];
+      const cols = Math.max(2, Math.ceil(Math.sqrt(mountains.length*1.5)));
+      const sysW = cols*(TILE_W+TILE_GAP)+SYS_PAD*2;
+      const rows = Math.ceil(mountains.length/cols);
+      const sysH = rows*(TILE_H+TILE_GAP)+SYS_PAD*2+20;
+
+      if (cursorX+sysW-regionX>maxRowW && cursorX>regionX) {
+        cursorX=regionX; cursorY+=rowMaxH+30; rowMaxH=0;
+      }
+
+      positions[meta.id] = {x:cursorX,y:cursorY,w:sysW,h:sysH,
+        item:DATA.find(d=>d.id===meta.id), isSystem:true};
+
+      mountains.forEach((m,i) => {
+        const col=i%cols, row=Math.floor(i/cols);
+        positions[m.id] = {
+          x:cursorX+SYS_PAD+col*(TILE_W+TILE_GAP),
+          y:cursorY+SYS_PAD+20+row*(TILE_H+TILE_GAP),
+          w:TILE_W, h:TILE_H, item:m
+        };
+      });
+
+      cursorX+=sysW+15;
+      rowMaxH=Math.max(rowMaxH,sysH);
+    });
+  }
+
+  // Water near parent
+  for (const d of DATA) {
+    if (d['类别']==='水' && d['所属山系']) {
+      for (const [id,p] of Object.entries(positions)) {
+        if (p.item && p.item['名字']===d['所属山系'] && p.item['类别']!=='山系') {
+          positions[d.id] = {x:p.x,y:p.y,w:p.w,h:p.h,item:d,isWater:true,parentId:id,
+            flowDir:parseFlowDir(d['水流方向'])};
+          break;
+        }
+      }
+    }
+  }
+  return positions;
+}
+
+// === Layout: outer rings ===
+function layoutRings(DATA) {
+  const positions = {};
+  const rings = {
+    '海内':{offset:1,items:{'南':[],'北':[],'东':[],'西':[],'中':[]}},
+    '海外':{offset:2,items:{'南':[],'北':[],'东':[],'西':[],'中':[]}},
+    '大荒':{offset:3,items:{'南':[],'北':[],'东':[],'西':[],'中':[]}},
+  };
+
+  for (const d of DATA) {
+    const ring = getRingName(d['所属经文']);
+    if (ring) rings[ring].items[getJingDirection(d['所属经文'])].push(d);
+  }
+
+  for (const [,ring] of Object.entries(rings)) {
+    const off=ring.offset;
+    const halfW=INNER_W/2+off*RING_GAP, halfH=INNER_H/2+off*RING_GAP;
+    const bandW=RING_GAP-20;
+
+    for (const [dir,items] of Object.entries(ring.items)) {
+      if (!items.length) continue;
+      if (dir==='南'||dir==='北') {
+        const tileW=Math.min(TILE_W*1.2,(2*halfW-20)/items.length-TILE_GAP);
+        const tileH=bandW-10;
+        const startX=CX-halfW+10;
+        const baseY=dir==='南'?CY+halfH-bandW+5:CY-halfH+5;
+        items.forEach((d,i) => { positions[d.id]={x:startX+i*(tileW+TILE_GAP),y:baseY,w:tileW,h:tileH,item:d}; });
+      } else if (dir==='东'||dir==='西') {
+        const tileH=Math.min(TILE_H*1.2,(2*halfH-20)/items.length-TILE_GAP);
+        const tileW=bandW-10;
+        const baseX=dir==='东'?CX+halfW-bandW+5:CX-halfW+5;
+        const startY=CY-halfH+10;
+        items.forEach((d,i) => { positions[d.id]={x:baseX,y:startY+i*(tileH+TILE_GAP),w:tileW,h:tileH,item:d}; });
+      } else {
+        const tileW=Math.min(TILE_W*1.2,(2*halfW-20)/items.length-TILE_GAP);
+        const tileH=bandW-10;
+        const startX=CX-halfW+10;
+        const baseY=CY+halfH-bandW+5;
+        items.forEach((d,i) => { positions[d.id]={x:startX+i*(tileW+TILE_GAP),y:baseY-tileH-5,w:tileW,h:tileH,item:d}; });
+      }
+    }
+  }
+  return positions;
+}
+
+// === SVG Rendering ===
+function renderSVG(DATA, allPos, colorIndex) {
+  const svg = document.getElementById('map-svg');
+
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  for (const p of Object.values(allPos)) {
+    minX=Math.min(minX,p.x-20); minY=Math.min(minY,p.y-20);
+    maxX=Math.max(maxX,(p.x+(p.w||60))+20); maxY=Math.max(maxY,(p.y+(p.h||40))+20);
+  }
+  const pad=100;
+  const vbX=minX-pad, vbY=minY-pad, vbW=maxX-minX+2*pad, vbH=maxY-minY+2*pad;
+  svg.setAttribute('viewBox',`${vbX} ${vbY} ${vbW} ${vbH}`);
+
+  let c = '';
+
+  // Background
+  c += `<rect x="${vbX}" y="${vbY}" width="${vbW}" height="${vbH}" fill="#1a1a2e"/>`;
+
+  // Ring borders
+  for (let i=0;i<=3;i++) {
+    const hw=INNER_W/2+i*RING_GAP, hh=INNER_H/2+i*RING_GAP;
+    const labels=['五山经','海内','海外','大荒'];
+    const colors=['#5a4a3a','#4a5a3a','#3a4a5a','#5a3a4a'];
+    c += `<rect x="${CX-hw}" y="${CY-hh}" width="${2*hw}" height="${2*hh}" fill="none" stroke="${colors[i]}" stroke-width="2" stroke-dasharray="${i===0?'':'10,5'}" rx="6"/>`;
+    c += `<text x="${CX-hw+14}" y="${CY-hh+24}" fill="${colors[i]}" font-size="22" opacity="0.7" font-weight="bold">${labels[i]}</text>`;
+  }
+
+  // Direction labels
+  [{t:'南',x:CX,y:CY+INNER_H/2-60,h:0},{t:'北',x:CX,y:CY-INNER_H/2+70,h:210},
+   {t:'东',x:CX+INNER_W/2-60,y:CY,h:145},{t:'西',x:CX-INNER_W/2+60,y:CY,h:42}]
+  .forEach(dl => {
+    c += `<text x="${dl.x}" y="${dl.y}" fill="hsl(${dl.h},60%,50%)" font-size="36" text-anchor="middle" dominant-baseline="middle" opacity="0.2" font-weight="bold">${dl.t}</text>`;
+  });
+
+  // System boxes
+  for (const [id,p] of Object.entries(allPos)) {
+    if (!p.isSystem) continue;
+    const cs = getSysColor(p.item['所属经文']);
+    c += `<rect x="${p.x}" y="${p.y}" width="${p.w}" height="${p.h}" fill="${cs.bg}" stroke="${cs.border}" stroke-width="1.5" stroke-dasharray="6,3" rx="4" opacity="0.4"/>`;
+    c += `<text x="${p.x+p.w/2}" y="${p.y+15}" fill="${cs.text}" font-size="12" text-anchor="middle" font-weight="bold">${p.item['名字']}</text>`;
+  }
+
+  // Water indicators
+  for (const [id,p] of Object.entries(allPos)) {
+    if (!p.isWater) continue;
+    const fd = p.flowDir||[1,0];
+    const cx=p.x+p.w/2, cy=p.y+p.h-5, len=12;
+    c += `<line x1="${cx-fd[0]*len}" y1="${cy-fd[1]*len}" x2="${cx+fd[0]*len}" y2="${cy+fd[1]*len}" stroke="#40ddaa" stroke-width="2" opacity="0.7" class="item" data-id="${id}"/>`;
+    c += `<circle cx="${cx+fd[0]*len}" cy="${cy+fd[1]*len}" r="2" fill="#40ddaa" opacity="0.7"/>`;
+  }
+
+  // Tile blocks
+  for (const [id,p] of Object.entries(allPos)) {
+    if (!p.item || p.isSystem || p.isWater) continue;
+    const d = p.item;
+    const cs = getColorSet(d['所属经文'], d.id, colorIndex);
+    const w=p.w||TILE_W, h=p.h||TILE_H;
+
+    c += `<rect x="${p.x}" y="${p.y}" width="${w}" height="${h}" fill="${cs.bg}" stroke="${cs.border}" stroke-width="1" rx="3" class="item" data-id="${id}" style="cursor:pointer"/>`;
+
+    const catLabel = d['类别'];
+    c += `<rect x="${p.x+2}" y="${p.y+2}" width="14" height="10" fill="rgba(255,255,255,0.1)" rx="2"/>`;
+    c += `<text x="${p.x+9}" y="${p.y+10}" fill="${cs.text}" font-size="7" text-anchor="middle" opacity="0.6">${catLabel}</text>`;
+
+    const name=d['名字'];
+    const fontSize = w<50?9:(name.length>4?10:12);
+    c += `<text x="${p.x+w/2}" y="${p.y+h/2+fontSize/3}" fill="${cs.text}" font-size="${fontSize}" text-anchor="middle" font-weight="bold" pointer-events="none">${name}</text>`;
+
+    if (d['方位距离'] && w>=50) {
+      const dirText = d['方位距离'].length>8 ? d['方位距离'].substring(0,8) : d['方位距离'];
+      c += `<text x="${p.x+w/2}" y="${p.y+h-4}" fill="${cs.text}" font-size="7" text-anchor="middle" opacity="0.4" pointer-events="none">${dirText}</text>`;
+    }
+  }
+
+  svg.innerHTML = c;
+  return { vbX, vbY, vbW, vbH };
+}
+
+// === Interactions ===
+function setupInteractions(svg, allPos, initVb) {
+  let {vbX,vbY,vbW,vbH} = initVb;
+  let isPanning=false, startX, startY, startVbX, startVbY;
+
+  svg.addEventListener('wheel', e => {
+    e.preventDefault();
+    const rect=svg.getBoundingClientRect();
+    const mx=(e.clientX-rect.left)/rect.width, my=(e.clientY-rect.top)/rect.height;
+    const factor=e.deltaY>0?1.1:0.9;
+    const newW=vbW*factor, newH=vbH*factor;
+    vbX+=(vbW-newW)*mx; vbY+=(vbH-newH)*my; vbW=newW; vbH=newH;
+    svg.setAttribute('viewBox',`${vbX} ${vbY} ${vbW} ${vbH}`);
+  }, {passive:false});
+
+  svg.addEventListener('mousedown', e => {
+    if (e.button!==0) return;
+    isPanning=true; startX=e.clientX; startY=e.clientY; startVbX=vbX; startVbY=vbY;
+  });
+
+  window.addEventListener('mousemove', e => {
+    const target=e.target.closest('.item');
+    const tooltip=document.getElementById('tooltip');
+    if (target) {
+      const id=target.getAttribute('data-id'), pos=allPos[id];
+      if (pos && pos.item) {
+        const d=pos.item;
+        const catColors={'山':'#c0392b','水':'#4a9','国':'#c49b30','谷':'#888','地':'#888','山系':'#aaa'};
+        let html=`<div class="tt-name">${d['名字']}</div>`;
+        html+=`<span class="tt-cat" style="background:${catColors[d['类别']]||'#666'}">${d['类别']}</span>`;
+        html+=` <span style="color:#888">${d['所属经文']}</span>`;
+        if(d['所属山系']) html+=`<br><span style="color:#999">山系: ${d['所属山系']}</span>`;
+        if(d['方位距离']) html+=`<br><span style="color:#999">方位: ${d['方位距离']}</span>`;
+        if(d['水流方向']) html+=`<br><span style="color:#4a9">水流: ${d['水流方向']}</span>`;
+        html+=`<div class="tt-text">${d['原文']}</div>`;
+        tooltip.innerHTML=html; tooltip.style.display='block';
+        let tx=e.clientX+15, ty=e.clientY+15;
+        if(tx+380>window.innerWidth) tx=e.clientX-395;
+        if(ty+200>window.innerHeight) ty=e.clientY-210;
+        tooltip.style.left=tx+'px'; tooltip.style.top=ty+'px';
+      }
+    } else { tooltip.style.display='none'; }
+
+    if (!isPanning) return;
+    const rect=svg.getBoundingClientRect();
+    vbX=startVbX-(e.clientX-startX)/rect.width*vbW;
+    vbY=startVbY-(e.clientY-startY)/rect.height*vbH;
+    svg.setAttribute('viewBox',`${vbX} ${vbY} ${vbW} ${vbH}`);
+  });
+
+  window.addEventListener('mouseup', () => { isPanning=false; });
+}
+
+// ============================================================
+// 主入口：加载数据 → 计算布局 → 渲染 → 绑定交互
+// ============================================================
+async function main() {
+  try {
+    const DATA = await loadData();
+    document.getElementById('loading').remove();
+    document.getElementById('info-bar').textContent =
+      `山海经地理可视化 · 共 ${DATA.length} 条 · 滚轮缩放 · 拖拽平移`;
+
+    const colorIndex = buildColorIndex(DATA);
+    const mountainPos = layoutMountains(DATA);
+    const ringPos = layoutRings(DATA);
+    const allPos = { ...mountainPos, ...ringPos };
+
+    const svg = document.getElementById('map-svg');
+    const vb = renderSVG(DATA, allPos, colorIndex);
+    setupInteractions(svg, allPos, vb);
+  } catch (err) {
+    document.getElementById('loading').textContent = '加载失败: ' + err.message;
+    console.error(err);
+  }
+}
+
+main();
+</script>
+</body>
+</html>
